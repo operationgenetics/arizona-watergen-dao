@@ -4,16 +4,11 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "../contracts/ArizonaWatergenDAO.sol";
 
-contract MockBindingCurve is IBindingCurveToken {
+contract MockOBSBindingCurve is IOBSBindingCurve {
     uint256 public totalRaisedDAI = 0;
-    mapping(address => uint256) public balanceOf;
 
     function setTotalRaisedDAI(uint256 _raised) external {
         totalRaisedDAI = _raised;
-    }
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
     }
 }
 
@@ -34,21 +29,28 @@ contract MockERC20Token is IERC20 {
 
 contract ArizonaWatergenDAOTest is Test {
     ArizonaWatergenDAO public dao;
-    MockBindingCurve public bondingCurve;
+    MockOBSBindingCurve public bondingCurveMock;
     MockERC20Token public rewardToken;
 
     address constant MASTER_ADMIN = 0xBe53702c6f57aF155410f883f38f92414d39E3d5;
     address public roomieRobot = address(0x999);
+    address public newRoomieRobot = address(0x888);
     address public member1 = address(0x1);
     address public member2 = address(0x2);
     address public attacker = address(0xBAD);
 
     bytes public pqcPublicKey = hex"deadbeef1234567890abcdef";
+    bytes public newPqcPublicKey = hex"cafeBABE1234567890abcdef";
 
     function setUp() public {
-        bondingCurve = new MockBindingCurve();
+        bondingCurveMock = new MockOBSBindingCurve();
         rewardToken = new MockERC20Token();
-        dao = new ArizonaWatergenDAO(address(bondingCurve));
+        dao = new ArizonaWatergenDAO();
+
+        // Deploy mock bonding curve code at the hardcoded OBS bonding curve address
+        bytes memory bytecode = type(MockOBSBindingCurve).creationCode;
+        vm.etch(0x000000000000000000000000000000000000dEaD, bytecode);
+        bondingCurveMock = MockOBSBindingCurve(0x000000000000000000000000000000000000dEaD);
     }
 
     function test_FullLifecycleAndSecurity() public {
@@ -91,9 +93,9 @@ contract ArizonaWatergenDAOTest is Test {
         vm.expectRevert("Already voted");
         dao.vote(1, true);
 
-        // 3. Funds Unlocking via Bonding Curve Milestone (5 Billion DAI)
+        // 3. Funds Unlocking via Hardcoded OBS Bonding Curve Milestone (5 Billion DAI)
         assertFalse(dao.fundsUnlocked());
-        bondingCurve.setTotalRaisedDAI(5_000_000_000 * 10**18);
+        bondingCurveMock.setTotalRaisedDAI(5_000_000_000 * 10**18);
         assertTrue(dao.checkAndUnlockFunds());
         assertTrue(dao.fundsUnlocked());
 
@@ -106,7 +108,20 @@ contract ArizonaWatergenDAOTest is Test {
         dao.setupRoomieRobotAndLock(roomieRobot, pqcPublicKey);
         assertTrue(dao.systemPermanentlyLocked());
 
-        // 5. PQC Secure Operations (Token Disbursement for Watergen Hardware)
+        // 5. Test Robot Address Update Feature
+        vm.prank(attacker);
+        vm.expectRevert("Unauthorized");
+        dao.updateRoomieRobot(newRoomieRobot, newPqcPublicKey);
+
+        vm.prank(MASTER_ADMIN);
+        dao.updateRoomieRobot(newRoomieRobot, newPqcPublicKey);
+        assertEq(dao.roomieRobot(), newRoomieRobot);
+
+        // Revert back to original roomieRobot for subsequent test flow
+        vm.prank(MASTER_ADMIN);
+        dao.updateRoomieRobot(roomieRobot, pqcPublicKey);
+
+        // 6. PQC Secure Operations (Token Disbursement for Watergen Hardware)
         rewardToken.mint(address(dao), 10_000 * 10**18);
 
         uint256 nonce = dao.robotExecutionNonce();
@@ -123,7 +138,7 @@ contract ArizonaWatergenDAOTest is Test {
         dao.executeRobotOperationsWithPQC(address(rewardToken), member1, 500 * 10**18, nonce, missionLog, validSig);
         assertEq(rewardToken.balanceOf(member1), 500 * 10**18);
 
-        // 6. Water Generation Logging & Ecological Constraint
+        // 7. Water Generation Logging & Ecological Constraint
         uint256 watergenNonce = dao.robotExecutionNonce();
         string memory sectorTag = "Tucson Solar Watergen Hub #1 - 5000L Output";
         bytes32 watergenMsgHash = keccak256(abi.encodePacked(roomieRobot, uint256(5000), sectorTag, watergenNonce));
@@ -138,7 +153,7 @@ contract ArizonaWatergenDAOTest is Test {
         assertEq(volume, 5000);
         assertTrue(ecologicalOnly);
 
-        // 7. Watergen Target & Mission Lock Enforcement
+        // 8. Watergen Target & Mission Lock Enforcement
         uint256 targetNonce = dao.robotExecutionNonce();
         uint256 targetIndex = 100000 * 10**18;
         bytes32 targetMsgHash = keccak256(abi.encodePacked(roomieRobot, targetIndex, targetNonce));
