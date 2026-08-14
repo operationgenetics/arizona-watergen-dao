@@ -35,7 +35,6 @@ contract ArizonaWatergenDAOTest is Test {
     address constant MASTER_ADMIN = 0xBe53702c6f57aF155410f883f38f92414d39E3d5;
     address public roomieRobot = address(0x999);
     address public member1 = address(0x1);
-    address public member2 = address(0x2);
 
     bytes public pqcPublicKey = hex"deadbeef1234567890abcdef";
 
