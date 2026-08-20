@@ -1,93 +1,67 @@
-// SPDX-License-Identifier: AGPLv3-3.0
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import "../contracts/ArizonaWatergenDAO.sol";
 
-contract MockOBSBindingCurve is IBindingCurveToken {
-    uint256 public totalRaisedDAI = 0;
-
-    function setTotalRaisedDAI(uint256 _raised) external {
-        totalRaisedDAI = _raised;
-    }
-}
-
-contract MockERC20Token is IERC20 {
-    mapping(address => uint256) public balanceOf;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
+contract MockDAI is IERC20 {
+    mapping(address => uint256) public balances;
     function transfer(address recipient, uint256 amount) external returns (bool) {
-        require(balanceOf[msg.sender] >= amount, "Insufficient balance");
-        balanceOf[msg.sender] -= amount;
-        balanceOf[recipient] += amount;
+        balances[msg.sender] -= amount;
+        balances[recipient] += amount;
         return true;
+    }
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool) {
+        balances[sender] -= amount;
+        balances[recipient] += amount;
+        return true;
+    }
+    function balanceOf(address account) external view returns (uint256) {
+        return balances[account];
+    }
+    function mint(address account, uint256 amount) external {
+        balances[account] += amount;
     }
 }
 
 contract ArizonaWatergenDAOTest is Test {
-    ArizonaWatergenDAO public dao;
-    MockOBSBindingCurve public bondingCurveMock;
-    MockERC20Token public rewardToken;
-
-    address constant MASTER_ADMIN = 0xBe53702c6f57aF155410f883f38f92414d39E3d5;
-    address public roomieRobot = address(0x999);
-    address public member1 = address(0x1);
-
-    bytes public pqcPublicKey = hex"deadbeef1234567890abcdef";
+    ArizonaWatergenDAO dao;
+    MockDAI dai;
+    address admin = address(0x1);
+    address user = address(0x2);
 
     function setUp() public {
-        bondingCurveMock = new MockOBSBindingCurve();
-        rewardToken = new MockERC20Token();
-        dao = new ArizonaWatergenDAO(address(bondingCurveMock));
+        dai = new MockDAI();
+        dao = new ArizonaWatergenDAO(address(dai), admin);
     }
 
-    function test_FullLifecycleAndSecurity() public {
-        vm.prank(member1);
+    function test_DeploymentAndConstants() public {
+        assertEq(dao.OBS_TOKEN_ADDRESS(), 0x2D8760e2877148d239a54952A458710553B2B54b);
+        assertEq(dao.DESIGNATED_UPDATE_WALLET(), 0xaF570ce3b32D765b1236635B0f541a7487A1fB8e);
+        assertFalse(dao.isImmutable());
+    }
+
+    function test_JoinAndMonthlyLP() public {
+        vm.prank(user);
         dao.joinDAO();
-        assertTrue(dao.getVotingPower(member1) == 100 * 10**18);
+        assertEq(dao.getEffectiveLPBalance(user), 100 * 1e18);
+    }
 
-        vm.prank(member1);
-        dao.createProposal("Deploy 50 atmospheric water generators in Tucson Sector", 7);
+    function test_ProposalCreationAndVoting() public {
+        vm.startPrank(user);
+        dao.joinDAO();
+        
+        dao.createProposal("Deploy Atmospheric Water Generator Array", 3);
+        
+        // 50 LP spent for proposal, leaving 50 LP to vote
+        assertEq(dao.getEffectiveLPBalance(user), 50 * 1e18);
 
-        assertFalse(dao.fundsUnlocked());
-        bondingCurveMock.setTotalRaisedDAI(5_000_000_000 * 10**18);
-        assertTrue(dao.checkAndUnlockFunds());
-        assertTrue(dao.fundsUnlocked());
+        dao.vote(1, true);
+        vm.stopPrank();
 
-        vm.prank(MASTER_ADMIN);
-        dao.setupRoomieRobotAndLock(roomieRobot, pqcPublicKey);
-        assertTrue(dao.systemPermanentlyLocked());
-
-        rewardToken.mint(address(dao), 10_000 * 10**18);
-
-        uint256 nonce = dao.robotExecutionNonce();
-        string memory missionLog = "Deploying solar water generator array";
-        bytes32 messageHash = keccak256(abi.encodePacked(roomieRobot, address(rewardToken), member1, uint256(500 * 10**18), nonce, missionLog));
-        bytes memory validSig = abi.encodePacked(messageHash, bytes32(uint256(1)));
-
-        vm.prank(roomieRobot);
-        dao.executeRobotOperationsWithPQC(address(rewardToken), member1, 500 * 10**18, nonce, missionLog, validSig);
-        assertEq(rewardToken.balanceOf(member1), 500 * 10**18);
-
-        uint256 watergenNonce = dao.robotExecutionNonce();
-        string memory sectorTag = "Tucson Solar Watergen Hub #1";
-        bytes32 watergenMsgHash = keccak256(abi.encodePacked(roomieRobot, uint256(5000), sectorTag, watergenNonce));
-        bytes memory watergenSig = abi.encodePacked(watergenMsgHash, bytes32(uint256(1)));
-
-        vm.prank(roomieRobot);
-        dao.recordWatergenDeploymentWithPQC(5000, sectorTag, watergenNonce, watergenSig);
-        assertEq(dao.totalWaterGeneratedLiters(), 5000);
-
-        uint256 targetNonce = dao.robotExecutionNonce();
-        uint256 targetIndex = 100000 * 10**18;
-        bytes32 targetMsgHash = keccak256(abi.encodePacked(roomieRobot, targetIndex, targetNonce));
-        bytes memory targetSig = abi.encodePacked(targetMsgHash, bytes32(uint256(1)));
-
-        vm.prank(roomieRobot);
-        dao.reportAndEnforceWatergenTarget(targetIndex, targetNonce, targetSig);
-        assertTrue(dao.watergenTargetReached());
+        (uint256 id, address proposer, string memory desc, uint256 forVotes, uint256 againstVotes, uint256 deadline, uint256 costPaid, bool executed) = dao.proposals(1);
+        assertEq(forVotes, 50 * 1e18);
+        assertEq(againstVotes, 0);
+        assertFalse(executed);
     }
 }
